@@ -22,6 +22,7 @@
 import argparse
 from launchpadlib.launchpad import Launchpad
 import datetime
+import pygsheets
 import re
 import logging
 import sys
@@ -31,21 +32,13 @@ This programs keeps ODM projects' bugs in sync with the Somerville project.
 
 For more information see: goo.gl/ajiwG4
 """
-
-# -------------   CONFIGURATION   ------------
-# projects to scan for new bugs
-odm_projects = ['civet-cat', 'flying-fox', 'pygmy-possum', 'white-whale']
-# project that should contain bugs from all projects
-umbrella_project = 'somerville'
-# mapping between LP project names and people that should own the bugs from
-# that project
-owners = {
-        # FILL ME!
-}
-# bug title prefix that's added to bugs replicated in the umbrella project
-umbrella_prefix = '[ODM bug] '
-# ----------   END OF CONFIGURATION ----------
-
+try:
+    from odm_sync_config import (
+        odm_projects, umbrella_project, umbrella_prefix, lp_names,
+        tracking_doc_id,
+    )
+except ImportError as exc:
+    raise SystemExit("Problem with reading the config: {}".format(exc))
 
 status_list = ['New', 'Confirmed', 'Triaged', 'In Progress', 'Fix Committed']
 QMETRY_RE = re.compile('.*\[QMetry#(\d+)\]')
@@ -75,6 +68,7 @@ def url_to_bug_ref(text):
 
 class SyncTool:
     def __init__(self, credentials_file):
+        self._owners_spreadsheet = OwnersSpreadsheet()
         self.lp = Launchpad.login_with(
             'sync-odm-bugs', 'production',
             credentials_file=credentials_file)
@@ -85,14 +79,15 @@ class SyncTool:
             self.bug_db[proj] = dict()
             self.proj_db[proj] = self.lp.projects[proj]
         self.user_db = dict()
-        for person in set(owners.values()):
+        for person in set(self._owners_spreadsheet.owners.values()):
             self.user_db[person] = self.lp.people[person]
 
     def verify_bug(self, bug):
         qmetry_match = QMETRY_RE.match(bug.bug.title)
         comment = ""
-        if not qmetry_match:
-            comment = 'Missing QMetry info in the title'
+        if not qmetry_match and 'checkbox' not in bug.bug.tags:
+            comment = ('Missing QMetry info in the title and missing checkbox'
+                'tag')
             logging.info("%s for bug %s", comment, bug.bug.id)
         last_updated = bug.bug.date_last_updated
         if (datetime.datetime.now(
@@ -103,11 +98,15 @@ class SyncTool:
             self.add_odm_comment(bug, comment)
             bug.status = 'Invalid'
             bug.lp_save()
-        if 'checkbox' not in bug.bug.tags:
-            comment = "Bug report isn't tagged with 'checkbox'"
+        for tag in bug.bug.tags:
+            if tag in self._owners_spreadsheet.owners.keys():
+                break
+        else:
+            comment = "Bug report isn't tagged with a platform tag"
             self.add_odm_comment(bug, comment)
             bug.status = 'Invalid'
             bug.lp_save()
+
         # TODO: add additional checks, like bug layout
 
         return not comment
@@ -136,10 +135,18 @@ class SyncTool:
                                 break
                 else:
                     bug_task = bug.bug_tasks[0]
+                    if proj not in self._owners_spreadsheet.owners.keys():
+                        logging.error(
+                            '%s project is not listed in the Management Spreadsheet',
+                            proj)
+                        owner = ''
+                    else:
+                        owner = self._owners_spreadsheet.owners[proj]
                     new_bug = self.file_bug(
                         umbrella_project, '[ODM bug] ' + bug_title,
                         bug.description, bug_task.status,
-                        bug.tags + [proj], owners[proj])
+                        bug.tags + [proj],
+                        owner)
                     self.add_bug_to_db(new_bug.bug_tasks[0])
                     self.bug_xref_db[bug.id] = new_bug.id
                     self.bug_xref_db[new_bug.id] = bug.id
@@ -154,24 +161,29 @@ class SyncTool:
         for proj in odm_projects:
             for odm_bug_name, odm_bug in self.bug_db[proj].items():
                 umb_bug = self.lp.bugs[self.bug_xref_db[odm_bug.id]]
-                odm_comments = [msg.content for msg in odm_bug.messages][1:]
-                umb_comments = [msg.content for msg in umb_bug.messages][1:]
-                # sync from odm to umbrella
-                for comment in [
-                        c for c in odm_comments if c not in umb_comments]:
-                    if comment.startswith(ODM_COMMENT_HEADER):
+                odm_messages = [msg for msg in odm_bug.messages][1:]
+                umb_messages = [msg for msg in umb_bug.messages][1:]
+                odm_comments = [msg.content for msg in odm_messages]
+                umb_comments = [msg.content for msg in umb_messages]
+
+                for msg in odm_messages:
+                    if msg.content in umb_comments:
+                        continue
+                    if msg.content.startswith(ODM_COMMENT_HEADER):
                         continue
                     logging.info('Adding missing comment from %s to %s',
                                  proj, umbrella_project)
-                    self._add_comment(umb_bug.bug_tasks[0], comment)
-                # sync from umbrella to odm
-                for comment in [
-                        c for c in umb_comments if c not in odm_comments]:
-                    if comment.startswith(ODM_COMMENT_HEADER):
+                    attachments = [a for a in msg.bug_attachments]
+                    self._add_comment(umb_bug.bug_tasks[0], msg.content, attachments)
+                for msg in umb_messages:
+                    if msg.content in odm_comments:
+                        continue
+                    if msg.content.startswith(ODM_COMMENT_HEADER):
                         continue
                     logging.info('Adding missing comment from %s to %s',
                                  umbrella_project, proj)
-                    self._add_comment(odm_bug.bug_tasks[0], comment)
+                    attachments = [a for a in msg.bug_attachments]
+                    self._add_comment(odm_bug.bug_tasks[0], msg.content, attachments)
                 self._sync_meta(odm_bug, umb_bug)
 
     def _sync_meta(self, bug1, bug2):
@@ -196,6 +208,10 @@ class SyncTool:
 
         if src.description != dest.description:
             dest.description = src.description
+            changed = True
+
+        if src.tags != dest.tags:
+            dest.tags = src.tags
             changed = True
 
         # get bug_task for both bugs
@@ -228,8 +244,16 @@ class SyncTool:
     def add_odm_comment(self, bug, message):
         self._add_comment(bug, ODM_COMMENT_HEADER + message)
 
-    def _add_comment(self, bug, message):
-        bug.bug.newMessage(content=message)
+    def _add_comment(self, bug, message, attachments=None):
+        # XXX: I think LP allows one attachment per bug message
+        if attachments:
+            bug.bug.addAttachment(
+                data=attachments[0].data.open().read(),
+                comment=message,
+                filename=attachments[0].title,
+                is_patch=attachments[0].type == 'Patch')
+        else:
+            bug.bug.newMessage(content=message)
 
     def main(self):
         for p in odm_projects:
@@ -244,6 +268,44 @@ class SyncTool:
             self.add_bug_to_db(bug)
         self.build_bug_db()
         self.sync_all()
+
+class OwnersSpreadsheet:
+
+    def __init__(self):
+        self._gcli = pygsheets.authorize()
+        self._owners = None
+
+    @property
+    def owners(self):
+        if not self._owners:
+            sheet = self._gcli.open_by_key(
+                tracking_doc_id)
+            column_j = sheet.worksheet_by_title(
+                'Platforms').get_col(10)[2:]
+            # 44 - AR column
+            column_ar = sheet.worksheet_by_title(
+                'Platforms').get_col(44)[2:]
+            self._owners = dict()
+            for platform, raw_owner in zip(column_j, column_ar):
+                if not raw_owner:
+                    logging.warning(
+                        "%s platform doesn't have an owner!", platform)
+                    continue
+                owner = lp_names.get(raw_owner)
+                if not owner:
+                    logging.warning(
+                        "No mapping to launchpad id for %s", raw_owner)
+                    continue
+                if not platform:
+                    continue
+                if platform in self._owners.keys():
+                    logging.debug('%s platform already registered', platform)
+                    if self._owners[platform] != owner:
+                        logging.warning(
+                            'And the owner is different! Previous %s, now %s',
+                            self._owners[platform], owner)
+                self._owners[platform] = owner
+        return self._owners
 
 
 def main():
