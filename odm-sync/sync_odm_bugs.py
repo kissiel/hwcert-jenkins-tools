@@ -38,8 +38,6 @@ except ImportError as exc:
     raise SystemExit("Problem with reading the config: {}".format(exc))
 
 status_list = ['New', 'Confirmed', 'Triaged', 'In Progress', 'Fix Committed']
-QMETRY_RE = re.compile('.*\[QMetry#(\d+)\]')
-
 ODM_COMMENT_HEADER = '[Automated ODM-sync-tool comment]\n'
 
 
@@ -73,6 +71,7 @@ class SyncTool:
         self.bug_db = dict()
         self.proj_db = dict()
         self.bug_xref_db = dict()
+        self.platform_map = dict()
         for proj in self._cfg.odm_projects + [self._cfg.umbrella_project]:
             self.bug_db[proj] = dict()
             self.proj_db[proj] = self.lp.projects[proj]
@@ -81,26 +80,18 @@ class SyncTool:
             self.user_db[person] = self.lp.people[person]
 
     def verify_bug(self, bug):
-        qmetry_match = QMETRY_RE.match(bug.bug.title)
-        if not qmetry_match:
-            qmetry_match = QMETRY_RE.match(bug.bug.description)
-        comment = ""
-        if not qmetry_match and 'checkbox' not in bug.bug.tags:
-            comment = ('Missing QMetry info and missing checkbox tag')
-            logging.info("%s for bug %s", comment, bug.bug.id)
+        comment = ''
         last_updated = bug.bug.date_last_updated
-        being_worked_on = bug.status in [
-            'Confirmed', 'Triaged', 'In Progress']
-        if not being_worked_on and (datetime.datetime.now(
+        if bug.status == 'Incomplete' and (datetime.datetime.now(
                 last_updated.tzinfo) - last_updated).days > 14:
             comment = 'No activity for more than 14 days'
             logging.info("%s on bug %s", comment, bug.bug.id)
-        if comment:
             self.add_odm_comment(bug, comment)
             bug.status = 'Invalid'
             bug.lp_save()
         for tag in bug.bug.tags:
             if tag in self._owners_spreadsheet.owners.keys():
+                self.platform_map[bug.bug.id] = tag
                 break
         else:
             comment = "Bug report isn't tagged with a platform tag"
@@ -108,7 +99,20 @@ class SyncTool:
             bug.status = 'Incomplete'
             bug.lp_save()
 
-        # TODO: add additional checks, like bug layout
+        mandatory_items = [
+            'expected result', 'actual result', 'sku', 'bios version',
+            'image/manifest', 'cpu', 'gpu', 'reproduce steps', 'qmetry id']
+
+        missing = []
+        for item in mandatory_items:
+            if not re.search(item, bug.bug.description, flags=re.IGNORECASE):
+                missing.append(item)
+        if missing:
+            comment = ('Marking as Incomplete because of missing information:'
+                       ' {}'.format(', '.join(missing)))
+            self.add_odm_comment(bug, comment)
+            bug.status = 'Incomplete'
+            bug.lp_save()
 
         return not comment
 
@@ -137,13 +141,14 @@ class SyncTool:
                                 break
                 else:
                     bug_task = bug.bug_tasks[0]
-                    if proj not in self._owners_spreadsheet.owners.keys():
+                    if bug.id not in self.platform_map.keys():
                         logging.error(
                             '%s project is not listed in the Management Spreadsheet',
                             proj)
                         owner = ''
                     else:
-                        owner = self._owners_spreadsheet.owners[proj]
+                        owner = self._owners_spreadsheet.owners[
+                            self.platform_map[bug.id]]
                     new_bug = self.file_bug(
                         self._cfg.umbrella_project, '[ODM bug] ' + bug_title,
                         bug.description, bug_task.status,
