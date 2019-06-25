@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # encoding: UTF-8
-# Copyright (c) 2018 Canonical Ltd.
+# Copyright (c) 2018-2019 Canonical Ltd.
 #
 # Authors:
 #   Sylvain Pineau <sylvain.pineau@canonical.com>
@@ -48,19 +48,24 @@ ODM_COMMENT_HEADER = '[Automated ODM-sync-tool comment]\n'
 logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
 
 
-def url_to_bug_ref(text):
+def find_bug_ref(text):
     """
     Search the `text` for bug's url and return the number of the first
     bug found, or None when bug URL is not found.
 
-    >>> url_to_bug_ref('https://bugs.launchpad.net/bugs/123')
+    >>> find_bug_ref('https://bugs.launchpad.net/bugs/123')
     123
-    >>> url_to_bug_ref('Foobar 3000')
-    >>> url_to_bug_ref('twoline\\nhttps://bugs.launchpad.net/bugs/456')
+    >>> find_bug_ref('Foobar 3000')
+    >>> find_bug_ref('twoline\\nhttps://bugs.launchpad.net/bugs/456')
     456
-    >>> url_to_bug_ref('https://bugs.launchpad.net/bugs/onetwo')
+    >>> find_bug_ref('https://bugs.launchpad.net/bugs/onetwo')
+    >>> find_bug_ref('Bug #1834180')
+    1834180
     """
     match = re.compile(r'https://bugs.launchpad.net/bugs/(\d+)').search(text)
+    if match:
+        return int(match.groups()[0])
+    match = re.compile(r'Bug #(\d+)').search(text)
     if match:
         return int(match.groups()[0])
 
@@ -95,9 +100,14 @@ class SyncTool:
             bug.lp_save()
         if bug.status == 'Incomplete':
             return False
-        if 'checkbox' not in bug.bug.tags:
-            return False
-        if 'cpm-reviewed' not in bug.bug.tags:
+        if ('checkbox' not in bug.bug.tags and
+                'cpm-reviewed' not in bug.bug.tags):
+            comment = (
+                "Bug report isn't tagged with either 'checkbox' or"
+                " 'cpm-reviewed'. Marking as incomplete.")
+            self._add_comment(bug, comment)
+            bug.status = 'Incomplete'
+            bug.lp_save()
             return False
         for tag in bug.bug.tags:
             if tag in self._owners_spreadsheet.owners.keys():
@@ -151,7 +161,7 @@ class SyncTool:
                     if u_bug.messages.total_size >= 2:
                         first_comment = u_bug.messages[1].content
                         if first_comment.startswith(ODM_COMMENT_HEADER):
-                            bug_no = url_to_bug_ref(first_comment)
+                            bug_no = find_bug_ref(first_comment)
                             if bug_no == bug.id:
                                 logging.debug(
                                     "bug %s already defined in umbrella",
@@ -176,11 +186,13 @@ class SyncTool:
                     self.add_bug_to_db(new_bug.bug_tasks[0])
                     self.bug_xref_db[bug.id] = new_bug.id
                     self.bug_xref_db[new_bug.id] = bug.id
-                    message = 'Bug filed from {} see {} for details'.format(
-                        proj, bug.web_link)
+                    message = ('This bug is from [{}] Launchpad project.'
+                               '\nPlease refer to Bug #{}'.format(proj, bug.id))
                     self._add_comment(new_bug.bug_tasks[0], message)
-                    message = 'Bug filed in {}. See {} for details'.format(
-                        self._cfg.umbrella_project, new_bug.web_link)
+                    message = ('This bug has been synced to {} Launchpad'
+                               ' project successfully.\nPlease refer to Bug'
+                               ' #{}'.format(
+                                   self._cfg.umbrella_project, new_bug.id))
                     self._add_comment(bug_task, message)
 
     def sync_all(self):
