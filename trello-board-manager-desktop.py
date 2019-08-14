@@ -16,6 +16,11 @@
 #
 # Written by:
 #        Taihsiang Ho <taihsiang.ho@canonical.com>
+#
+#
+# The script uses py-trello package 0.9.0. You may want to fetch it from
+# source.
+#
 
 import sys
 import argparse
@@ -42,8 +47,6 @@ codename_map = {'xenial': '16.04',
                 'disco': '19.04'}
 
 logger = logging.getLogger("trello-board-manager-desktop")
-format_str = "[ %(funcName)s() ] %(message)s"
-logging.basicConfig(format=format_str)
 
 
 def environ_or_required(key):
@@ -69,6 +72,11 @@ def move_card(config, lane_name, card):
         arch = config[m.group("stack")]["arch"]
         stack = m.group("stack")
         codename = m.group("stack").split('-')[0]
+
+        # TODO: you may need to update this mapping in the future when
+        # the oem image is based on the other distro
+        if codename == 'oem':
+            codename = 'bionic'
 
         logger.debug('arch: {}'.format(arch))
         logger.debug('stack: {}'.format(stack))
@@ -152,9 +160,17 @@ def main():
                         **environ_or_required('TRELLO_TOKEN'))
     parser.add_argument('--board', help="Trello board identifier",
                         **environ_or_required('TRELLO_BOARD'))
+    parser.add_argument('--debug', help="Enable the debug mode",
+                        action="store_true", default=False)
     parser.add_argument('config', help="snaps configuration",
                         type=argparse.FileType())
     args = parser.parse_args()
+
+    format_str = "[ %(funcName)s() ] %(message)s"
+    if args.debug:
+        logging.basicConfig(format=format_str, level=logging.DEBUG)
+    else:
+        logging.basicConfig(format=format_str)
 
     client = TrelloClient(api_key=args.key, token=args.token)
     board = client.get_board(args.board)
