@@ -119,10 +119,9 @@ def attach_labels(board, card, label_list):
 
 def run(args, board, c3_link, jenkins_link):
 
-    codename = args.name.split('-')[0]
-    kernel_stack = codename
+    kernel_stack = args.series
     if args.name.split('-')[1] == 'hwe':
-        kernel_stack = codename + '-hwe'
+        kernel_stack = args.series + '-hwe'
 
     # The current oem stack
     # For now it is bionic with linux-oem kernel
@@ -139,7 +138,9 @@ def run(args, board, c3_link, jenkins_link):
     # TODO: we could merge main and universe repositories from the source
     # jenkins jobs
     # linux-oem is in universe rather than main
-    if 'oem-osp1' in args.kernel and not codename == 'xenial':
+    if 'oem-osp1' in args.kernel and not args.series == 'xenial':
+        package_json_name_template = '{}-universe-{}-proposed.json'
+    elif 'raspi' in args.kernel:
         package_json_name_template = '{}-universe-{}-proposed.json'
     else:
         # packages of generic kernels
@@ -155,8 +156,9 @@ def run(args, board, c3_link, jenkins_link):
                                 package_json_name_template
 
     package_json_url = package_json_url_template.format(jenkins_host,
-                                                        codename,
+                                                        args.series,
                                                         args.arch)
+    logging.info('package json url: {}'.format(package_json_url))
     response = requests.get(url=package_json_url)
     package_data = response.json()
 
@@ -164,8 +166,8 @@ def run(args, board, c3_link, jenkins_link):
     # e.g. linux-generic-hwe-16.04 which version is 4.15.0.50.71
     dlv = package_data[args.kernel].split('.')
     dlv_short = dlv[0] + '_' + dlv[1] + '_' + dlv[2] + '-' + dlv[3]
-    logging.debug("linux deb version: {}".format(dlv))
-    logging.debug("linux deb version (underscores): {}".format(dlv_short))
+    logging.info("linux deb version: {}".format(dlv))
+    logging.info("linux deb version (underscores): {}".format(dlv_short))
     kernel_suffix = kernel_stack
     if args.sru_type == 'stock' or args.sru_type == 'stock-hwe':
         # for stock images, it always uses generic kernels
@@ -189,7 +191,11 @@ def run(args, board, c3_link, jenkins_link):
         # TODO: we may need to add more conditions when more oem images
         # is updated to use generic kernel
         kernel_suffix = 'generic'
-    logging.debug("kernel_suffix: {}".format(kernel_suffix))
+
+    if 'raspi' in args.kernel:
+        kernel_suffix = 'raspi2'
+
+    logging.info("kernel_suffix: {}".format(kernel_suffix))
 
     deb_kernel_image = 'linux-image-' + dlv_short + '-' + kernel_suffix
     deb_version = package_data[deb_kernel_image]
@@ -250,7 +256,7 @@ def run(args, board, c3_link, jenkins_link):
     sut = cid
     if (kernel_stack == 'xenial' or kernel_stack == 'xenial-hwe')\
        and str(args.sru_type) == 'oem':
-            sut = cid + '-oem'
+        sut = cid + '-oem'
     if 'argos' in args.queue:
         if 'desktop' in args.name:
             sut = cid + '-dgx-station'
@@ -368,19 +374,19 @@ class TestTrelloUpdaterKernelDebSRU(unittest.TestCase):
 
         requests.get = MagicMock(return_value=self._request_get())
         requests.models.Response.json = MagicMock(
-                                        side_effect=self._get_package_data)
+            side_effect=self._get_package_data)
         trello.board.Board.get_cards = MagicMock(return_value=self._get_cards(
-                                                self.board,
-                                                9999,
-                                                card_name))
+            self.board,
+            9999,
+            card_name))
         trello.board.Card.comment = MagicMock(return_value="fake_comment")
         trello.board.Card.fetch_checklists = MagicMock(
-                                                return_value=[])
+            return_value=[])
         mock_checklist = MagicMock()
         mock_checklist.add_checklist_item = print
 
         trello.board.Card.add_checklist = MagicMock(
-                                            return_value=mock_checklist)
+            return_value=mock_checklist)
 
     def setUp(self):
         self.debs_yaml_stream = open('./data/debs.yaml')
