@@ -91,11 +91,11 @@ def run(args, board, c3_link, jenkins_link):
     # In order to distinguish them, we add a prefix to the item name.
     if 'oem' in args.kernel and 'oem' in args.sru_type and args.series == 'bionic':
         print(kernel_stack,args.kernel)
-        kernel_stack = 'bionic'
+        kernel_stack = 'bionic-hwe'
         if 'osp1' in args.kernel:
-            args.name = 'oem-osp1-'+ args.name
+            args.name = 'oem-osp1-'+ args.name + '-hwe'
         else:
-            args.name = 'oem-'+ args.name
+            args.name = 'oem-'+ args.name + '-hwe'
 
     # linux deb version
     # e.g. linux-generic-hwe-16.04 which version is 4.15.0.50.71
