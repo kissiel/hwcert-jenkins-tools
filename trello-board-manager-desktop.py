@@ -122,6 +122,8 @@ def move_card(config, lane_name, card):
                 svf = pkg_data['linux-oem-20_04b']
             elif 'oem' in stack and '5.13' in card.name:
                 svf = pkg_data['linux-oem-20_04c']
+            elif 'oem' in stack and '5.14' in card.name:
+                svf = pkg_data['linux-oem-20_04d']
             else:
                 svf = pkg_data['linux-generic']
 
